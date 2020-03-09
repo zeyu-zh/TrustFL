@@ -1,0 +1,33 @@
+/* Enclave.edl - Top EDL file. */
+
+enclave {
+
+    struct file_info{
+        void * p_file;
+        unsigned long length;
+    };
+
+    trusted {
+        public void ecall_ml_small();
+        public void ecall_ml_vgg16();
+        public void ecall_ml_large();
+        public void ecall_ml_matrix_breakdown();
+        public void ecall_ml_resnet50();
+        public void ecall_init();
+        public int ecall_data_preprocess([user_check] unsigned char* p_datau, unsigned int data_length, [user_check] unsigned char* p_labelu, unsigned int label_length, unsigned long p_training_hmacu);
+        public unsigned int ecall_get_seed();
+        public void ecall_param_preprocess(int num_param);
+    };
+
+
+    untrusted {
+        void ocall_print_string([in, string] const char *str);
+        void ocall_start_clock();
+        double ocall_get_time();
+        void ocall_end_clock([in, string] const char *str);
+        int ocall_open_file([in, string] const char *str, [in, out]struct file_info *info);
+        int ocall_close_file([in, out]struct file_info *info);
+        int ocall_get_parameter([in, string] const char *str, [out, count = num] float* p_data, int num);
+        int ocall_get_data(int index, [out, count = 784] unsigned char *data, [out] unsigned char *lable);
+    };
+};
