@@ -1,6 +1,13 @@
 ######## SGX SDK Settings ########
 
 SGX_SDK ?= /opt/intel/sgxsdk
+# Some distributions install the SDK elsewhere (e.g. Alibaba Cloud Linux ships it
+# under /opt/alibaba/teesdk/intel/sgxsdk). Fall back to that location.
+ifeq ($(wildcard $(SGX_SDK)/include),)
+  ifneq ($(wildcard /opt/alibaba/teesdk/intel/sgxsdk/include),)
+    SGX_SDK := /opt/alibaba/teesdk/intel/sgxsdk
+  endif
+endif
 SGX_MODE ?= HW
 SGX_ARCH ?= x64
 SGX_DEBUG ?= 0
@@ -40,6 +47,9 @@ endif
 
 
 GCC_VERSION := $(shell expr "`$(CC) -dumpversion`")
+# Ask the compiler where its intrinsic headers live instead of hardcoding a
+# Debian-style path (Alibaba Cloud Linux uses .../x86_64-redhat-linux/10/...).
+GCC_INCLUDE := $(shell $(CC) -print-file-name=include)
 
 
 ######## App Settings ########
@@ -96,7 +106,7 @@ Crypto_Library_Name := sgx_tcrypto
 Enclave_Cpp_Files := $(wildcard Enclave/*.cpp)
 MiniDnn_Cpp_Files := mnist.cpp network.cpp sgd.cpp ResNet.cpp cross_entropy_loss.cpp ave_pooling.cpp conv.cpp fully_connected.cpp layer_block.cpp max_pooling.cpp relu.cpp sigmoid.cpp softmax.cpp identity_block.cpp conv_block.cpp
 Enclave_Include_Paths := -IEnclave -I$(SGX_SDK)/include -I$(SGX_SDK)/include/tlibc -I$(SGX_SDK)/include/libcxx
-Enclave_Include_Paths += -IInclude -IInclude/eigen3_sgx -I/usr/lib/gcc/x86_64-linux-gnu/$(GCC_VERSION)/include -IEnclave/MiniDnn
+Enclave_Include_Paths += -IInclude -IInclude/eigen3_sgx -I$(GCC_INCLUDE) -IEnclave/MiniDnn
 
 
 
@@ -152,7 +162,7 @@ else
 endif
 endif
 
-.PHONY: all target run
+.PHONY: all target run test
 all: .config_$(Build_Mode)_$(SGX_ARCH)
 	@$(MAKE) target
 
@@ -188,6 +198,11 @@ ifneq ($(Build_Mode), HW_RELEASE)
 	@echo "RUN  =>  $(App_Name) [$(SGX_MODE)|$(SGX_ARCH), OK]"
 endif
 
+# Security regression tests (see tests/README.md).  Expects the MNIST files to
+# be present under ./Training/.
+test: security_test $(Signed_Enclave_Name)
+	@sh tests/run_security_tests.sh
+
 .config_$(Build_Mode)_$(SGX_ARCH):
 	@rm -f .config_* $(App_Name) $(Enclave_Name) $(Signed_Enclave_Name) $(App_Cpp_Objects) App/Enclave_u.* $(Enclave_Cpp_Objects) Enclave/Enclave_t.*
 	@touch .config_$(Build_Mode)_$(SGX_ARCH)
@@ -208,7 +223,16 @@ App/%.o: App/%.cpp  App/Enclave_u.h
 	@$(CXX) $(SGX_COMMON_CXXFLAGS) $(App_Cpp_Flags) -c $< -o $@
 	@echo "CXX  <=  $<"
 
+tests/%.o: tests/%.cpp App/Enclave_u.h
+	@$(CXX) $(SGX_COMMON_CXXFLAGS) $(App_Cpp_Flags) -c $< -o $@
+	@echo "CXX  <=  $<"
+
 $(App_Name): App/Enclave_u.o $(App_Cpp_Objects)
+	@$(CXX) $^ -o $@ $(App_Link_Flags)
+	@echo "LINK =>  $@"
+
+# Security regression tests: same untrusted runtime as the app, own main().
+security_test: App/Enclave_u.o App/verify.o tests/security_test.o
 	@$(CXX) $^ -o $@ $(App_Link_Flags)
 	@echo "LINK =>  $@"
 
@@ -260,4 +284,4 @@ $(Signed_Enclave_Name): $(Enclave_Name)
 .PHONY: clean
 
 clean:
-	@rm -f .config_* $(App_Name) $(Enclave_Name) $(Signed_Enclave_Name) $(App_Cpp_Objects) App/Enclave_u.* $(Enclave_Cpp_Objects) $(MiniDnn_Cpp_Objects) Enclave/Enclave_t.* SGXDNN/bin_sgx/sgxaes_asm.o
+	@rm -f .config_* $(App_Name) $(Enclave_Name) $(Signed_Enclave_Name) security_test $(App_Cpp_Objects) App/Enclave_u.* $(Enclave_Cpp_Objects) $(MiniDnn_Cpp_Objects) tests/*.o Enclave/Enclave_t.* SGXDNN/bin_sgx/sgxaes_asm.o

@@ -56,12 +56,19 @@ void destroy_enclave(){
 
 void initialize_trustfl(const int training_rounds){
     /* Get random seed from enclave */
-    uint32_t seed;
-    int ret_val;
+    uint32_t seed = 0;
+
+    if (training_rounds <= 0 || training_rounds + 1 > MAX_PARAM_ROUNDS) {
+        printf("Invalid number of training rounds: %d\n", training_rounds);
+        exit(-1);
+    }
 
     printf("[Enclave]: Generating seed\n");
-    sgx_get_seed(&seed);
-    ret_val = system("rm seed");
+    if (sgx_get_seed(&seed) != SGX_SUCCESS) {
+        printf("Failed to get a seed from the enclave\n");
+        exit(-1);
+    }
+    system("rm -f seed");
     fstream seed_file("./seed", ios::out);
 
     if(!seed_file.is_open()){
@@ -75,18 +82,25 @@ void initialize_trustfl(const int training_rounds){
 
     printf("[Enclave]: generate key of HMAC inside enclave\n");
     /* Init ecall, generate key of HMAC in enclave*/
-    sgx_init(60000); 
+    if (sgx_init(TRAIN_NUM) != SGX_SUCCESS) {
+        printf("Failed to initialize the enclave state\n");
+        exit(-1);
+    }
     
     printf("[Enclave]: Preprocessing data (calculate HMAC), please wait..\n");
     /* Preprocess data, calculate HMAC */
-    sgx_data_preprocess();
+    if (sgx_data_preprocess() != 0) {
+        printf("Failed to preprocess the training data\n");
+        exit(-1);
+    }
 
     // int num_para;
 
     char python[128];
     sprintf(python, "python mnist_classfiy.py %d", training_rounds);
     // system("python mnist_classfiy.py %d" % num_para);
-    system(python);
+    if (system(python) != 0)
+        printf("Untrusted: warning, external training script failed\n");
 
     printf("[Untrusted]: preprocess parameter (calculate HASH), please wait.. \n");
     /* Preprocess parameter, calculate hash */
@@ -96,65 +110,110 @@ void initialize_trustfl(const int training_rounds){
 
 
 sgx_status_t sgx_init(int num_data){
-    p_hmac = (uint8_t*)malloc(num_data * 32);
-    ecall_init(global_eid);
+    if (num_data != TRAIN_NUM) {
+        cout << "Untrusted: unexpected training set size " << num_data << endl;
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
 
-    return SGX_SUCCESS;
+    free(p_hmac);
+    p_hmac = (uint8_t*)malloc(HMAC_BYTES);
+    if (p_hmac == nullptr) {
+        cout << "Untrusted: failed to allocate the hmac buffer" << endl;
+        return SGX_ERROR_OUT_OF_MEMORY;
+    }
+
+    return ecall_init(global_eid);
 }
 
 sgx_status_t sgx_get_seed(uint32_t* seed){
-    ecall_get_seed(global_eid, seed);
-    return SGX_SUCCESS;
+    if (seed == nullptr)
+        return SGX_ERROR_INVALID_PARAMETER;
+    return ecall_get_seed(global_eid, seed);
 }
 
-sgx_status_t sgx_data_preprocess(){
-    string training_data = "./Training/train-images.idx3-ubyte", training_label = "./Training/train-labels.idx1-ubyte";
+/*
+ * Feed the training set to the enclave and collect the HMAC of every sample.
+ * Returns 0 on success, -1 otherwise.
+ */
+int sgx_data_preprocess(){
+    const string training_data = "./Training/train-images.idx3-ubyte";
+    const string training_label = "./Training/train-labels.idx1-ubyte";
     struct stat sbuff_a, sbuff_b;
-    sgx_status_t ret = SGX_ERROR_UNEXPECTED;
-    int sgx_ret;
+    void* p_data = MAP_FAILED;
+    void* p_label = MAP_FAILED;
+    int fd_data = -1, fd_label = -1;
+    int sgx_ret = 0;
+    int rc = -1;
 
-    /* mmap trainning data into memory s*/
-    int fd_data = open(training_data.c_str(), O_RDWR, 0644);
-    if(fd_data == -1){
-        cout << "Untrusted: failed to open file " << training_data << " in sgx_data_preprocess" << endl;
-        return ret;
+    memset(&sbuff_a, 0, sizeof(sbuff_a));
+    memset(&sbuff_b, 0, sizeof(sbuff_b));
+
+    if (p_hmac == nullptr) {
+        cout << "Untrusted: hmac buffer is not initialized, call sgx_init first" << endl;
+        return -1;
     }
-    stat(training_data.c_str(), &sbuff_a);
-    void* p_data = mmap(NULL, sbuff_a.st_size, PROT_READ, MAP_PRIVATE, fd_data, 0);
-    if(p_data == NULL){
+
+    /* mmap training data */
+    fd_data = open(training_data.c_str(), O_RDWR, 0644);
+    if (fd_data == -1) {
+        cout << "Untrusted: failed to open file " << training_data << " in sgx_data_preprocess" << endl;
+        goto out;
+    }
+    if (fstat(fd_data, &sbuff_a) != 0 || (size_t)sbuff_a.st_size < DATA_LENGTH_MIN) {
+        cout << "Untrusted: training data file is missing or too small" << endl;
+        goto out;
+    }
+    p_data = mmap(NULL, sbuff_a.st_size, PROT_READ, MAP_PRIVATE, fd_data, 0);
+    if (p_data == MAP_FAILED) {
+        p_data = MAP_FAILED;
         cout << "Untrusted: failed to mmap file " << training_data << " in sgx_data_preprocess" << endl;
-        close(fd_data);
-        return ret;
+        goto out;
     }
     close(fd_data);
+    fd_data = -1;
 
-
-    /* mmap label into memory */
-    int fd_label = open(training_label.c_str(), O_RDWR, 0644);
-    if(fd_label == -1){
+    /* mmap labels */
+    fd_label = open(training_label.c_str(), O_RDWR, 0644);
+    if (fd_label == -1) {
         cout << "Untrusted: failed to open file " << training_label << " in sgx_data_preprocess" << endl;
-        return ret;
-    } 
-    stat(training_label.c_str(), &sbuff_b);
-    void* p_label = mmap(NULL, sbuff_b.st_size, PROT_READ, MAP_PRIVATE, fd_label, 0);
-    if(p_label == NULL){
+        goto out;
+    }
+    if (fstat(fd_label, &sbuff_b) != 0 || (size_t)sbuff_b.st_size < LABEL_LENGTH_MIN) {
+        cout << "Untrusted: label file is missing or too small" << endl;
+        goto out;
+    }
+    p_label = mmap(NULL, sbuff_b.st_size, PROT_READ, MAP_PRIVATE, fd_label, 0);
+    if (p_label == MAP_FAILED) {
+        p_label = MAP_FAILED;
         cout << "Untrusted: failed to mmap file " << training_label << " in sgx_data_preprocess" << endl;
-        close(fd_label);
-        return ret;
+        goto out;
     }
     close(fd_label);
+    fd_label = -1;
 
-    ecall_data_preprocess(global_eid, &sgx_ret, (uint8_t*)p_data, sbuff_a.st_size, (uint8_t*)p_label, sbuff_b.st_size, (unsigned long)p_hmac);
-    if(sgx_ret != 0)
-        cout << "Untrusted: failed to preprocess data" << endl;
+    {
+        sgx_status_t status = ecall_data_preprocess(global_eid, &sgx_ret,
+                                                    (uint8_t*)p_data, (unsigned int)sbuff_a.st_size,
+                                                    (uint8_t*)p_label, (unsigned int)sbuff_b.st_size,
+                                                    (unsigned long)p_hmac);
+        if (status != SGX_SUCCESS) {
+            cout << "Untrusted: ecall_data_preprocess failed, status = 0x" << hex << status << dec << endl;
+            goto out;
+        }
+    }
+    if (sgx_ret != 0) {
+        cout << "Untrusted: failed to preprocess data, enclave returned " << sgx_ret << endl;
+        goto out;
+    }
 
-    munmap(p_data, sbuff_a.st_size);
-    munmap(p_label, sbuff_b.st_size);
-    p_data = nullptr;
-    p_label = nullptr;
+    rc = 0;
 
-
-    return SGX_SUCCESS;
+out:
+    if (fd_data != -1) close(fd_data);
+    if (fd_label != -1) close(fd_label);
+    if (p_data != MAP_FAILED) munmap(p_data, sbuff_a.st_size);
+    if (p_label != MAP_FAILED) munmap(p_label, sbuff_b.st_size);
+    return rc;
 }
 
 /* OCall functions */
@@ -212,44 +271,63 @@ int ocall_close_file(struct file_info *info){
 int ocall_get_data(int index, uint8_t *data, uint8_t *lable){
     string data_path = "./Training/train-images.idx3-ubyte", label_path = "./Training/train-labels.idx1-ubyte";
     struct stat sbf;
+    size_t data_size = 0, label_size = 0;
+    void* p_data = MAP_FAILED;
+    void* p_label = MAP_FAILED;
+    int fd = -1;
+    int rc = -1;
 
-    int fd = open(data_path.c_str(), O_RDWR, 0644);
+    if (data == nullptr || lable == nullptr || index < 0 || index >= TRAIN_NUM)
+        return -1;
+
+    fd = open(data_path.c_str(), O_RDWR, 0644);
     if(fd == -1){
         printf("Untrusted: failed to open file <%s> in ocall_get_data\n", data_path.c_str());
         return -1;
     }
-    stat(data_path.c_str(), &sbf);
-    void* p_data = mmap(NULL, sbf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if(p_data == NULL){
-        printf("Untrusted: failed to mmap <%s> in ocall_get_data\n", data_path.c_str());
+    if (fstat(fd, &sbf) != 0 || (size_t)sbf.st_size < DATA_LENGTH_MIN){
+        printf("Untrusted: invalid data file <%s> in ocall_get_data\n", data_path.c_str());
         close(fd);
         return -1;
     }
+    data_size = (size_t)sbf.st_size;
+    p_data = mmap(NULL, data_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
+    fd = -1;
+    if(p_data == MAP_FAILED){
+        printf("Untrusted: failed to mmap <%s> in ocall_get_data\n", data_path.c_str());
+        p_data = MAP_FAILED;
+        return -1;
+    }
 
     /* magic + rows * colums * index */
-    uint8_t* data_sour = (uint8_t*)p_data + 16 + 28 * 28 * index;
-    memcpy(data, data_sour, 28 * 28);
-    munmap(p_data, sbf.st_size);
+    memcpy(data, (uint8_t*)p_data + IDX_DATA_HEADER + (size_t)IMG_PIXELS * index, IMG_PIXELS);
 
     fd = open(label_path.c_str(), O_RDWR, 0644);
     if(fd == -1){
         printf("Untrusted: failed to open file <%s> in ocall_get_data\n", label_path.c_str());
-        return -1;
+        goto out;
     }
-    stat(label_path.c_str(), &sbf);
-    void* p_label = mmap(NULL, sbf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if(p_label == NULL){
+    if (fstat(fd, &sbf) != 0 || (size_t)sbf.st_size < LABEL_LENGTH_MIN){
+        printf("Untrusted: invalid label file <%s> in ocall_get_data\n", label_path.c_str());
+        goto out;
+    }
+    label_size = (size_t)sbf.st_size;
+    p_label = mmap(NULL, label_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if(p_label == MAP_FAILED){
         printf("Untrusted: failed to mmap <%s> in ocall_get_data\n", label_path.c_str());
-        close(fd);
-        return -1;
+        p_label = MAP_FAILED;
+        goto out;
     }
-    close(fd);
 
-    *lable = *((uint8_t*)p_label + 8 + index);
-    munmap(p_label, sbf.st_size);
+    *lable = *((uint8_t*)p_label + IDX_LABEL_HEADER + index);
+    rc = 0;
 
-    return 0;
+out:
+    if (fd != -1) close(fd);
+    if (p_data != MAP_FAILED) munmap(p_data, data_size);
+    if (p_label != MAP_FAILED) munmap(p_label, label_size);
+    return rc;
 }
 
 int ocall_get_parameter(const char *str, float* p_data, int num){

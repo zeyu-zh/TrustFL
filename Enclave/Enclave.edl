@@ -14,7 +14,15 @@ enclave {
         public void ecall_ml_matrix_breakdown();
         public void ecall_ml_resnet50();
         public void ecall_init();
+        /*
+         * All three pointers are [user_check] (raw host addresses).  The enclave
+         * validates the lengths and the sgx_is_outside_enclave() spans, then
+         * copies the training set into enclave-owned memory before using it.
+         * That rejects pointers into enclave memory and removes the
+         * time-of-check/time-of-use window on the inputs.
+         */
         public int ecall_data_preprocess([user_check] unsigned char* p_datau, unsigned int data_length, [user_check] unsigned char* p_labelu, unsigned int label_length, unsigned long p_training_hmacu);
+        public int ecall_verify_sample(unsigned int index, [user_check] unsigned char* p_data, unsigned char label);
         public unsigned int ecall_get_seed();
         public void ecall_param_preprocess(int num_param);
     };

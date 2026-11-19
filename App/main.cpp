@@ -48,7 +48,9 @@ int main(int argc, char *argv[]){
 
     printf("[Enclave]: Start verifying inside enclave\n");
     /* Start verifying in enclaves */
-    ecall_ml_vgg16(global_eid);
+    sgx_status_t status = ecall_ml_vgg16(global_eid);
+    if (status != SGX_SUCCESS)
+        printf("Untrusted: ecall_ml_vgg16 failed, status = 0x%x\n", status);
 
     /* Destroy the enclave */
     destroy_enclave();
