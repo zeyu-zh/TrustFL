@@ -82,16 +82,19 @@ void Network::check_gradient(const Matrix& input, const Matrix& target,
 
   const float eps = 1e-4;
   const int n_layer = deriv.size();
+  if (n_layer <= 0) return;
   for (int i = 0; i < n_points; i++) {
     // Randomly select a layer
-    int zzy_rand;
-    sgx_read_rand((unsigned char*)&zzy_rand, 4);
-    const int layer_id = int(zzy_rand / double(RAND_MAX) * n_layer);
+    uint32_t zzy_rand = 0;
+    if (sgx_read_rand((unsigned char*)&zzy_rand, sizeof(zzy_rand)) != SGX_SUCCESS)
+      zzy_rand = 0;
+    const int layer_id = (int)(zzy_rand % (uint32_t)n_layer);
     // Randomly pick a parameter, note that some layers may have no parameters
     const int n_param = deriv[layer_id].size();
     if (n_param < 1)  continue;
-    sgx_read_rand((unsigned char*)&zzy_rand, 4);
-    const int param_id = int(zzy_rand / double(RAND_MAX) * n_param);
+    if (sgx_read_rand((unsigned char*)&zzy_rand, sizeof(zzy_rand)) != SGX_SUCCESS)
+      zzy_rand = 0;
+    const int param_id = (int)(zzy_rand % (uint32_t)n_param);
     // Turbulate the parameter a little bit
     const float old = param[layer_id][param_id];
 

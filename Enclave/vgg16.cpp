@@ -45,7 +45,8 @@ int judge(std::vector<std::vector<float> > vnet, int ith_batch)
 {
     int error_number = 0;
     float *p_conv1, *p_conv2, *p_fc1, *p_fc2, *p_fc3;
-    sgx_get_parameters(ith_batch, &p_conv1, &p_conv2, &p_fc1, &p_fc2, &p_fc3);
+    if (sgx_get_parameters(ith_batch, &p_conv1, &p_conv2, &p_fc1, &p_fc2, &p_fc3) != 0)
+        return 0;
     std::vector<float> v1,v2,v3,v4,v5;
     for(int i = 0; i < CONV1_SIZE; i++)
         v1.push_back(p_conv1[i]);
@@ -101,10 +102,13 @@ void ecall_ml_vgg16() {
     printf("[Enclave]: Round number:");
     for(int i = 0; i < proof_number; i++){
         unsigned int temp = 0;
-        sgx_read_rand((uint8_t*)&temp, 32);
+        /* temp is a 4-byte value: only ask for as many random bytes as it holds */
+        if (sgx_read_rand((uint8_t*)&temp, sizeof(temp)) != SGX_SUCCESS)
+            temp = 0;
         temp = temp % total_rounds;
         while(std::find(proof.begin(), proof.end(), temp) != proof.end()){
-            sgx_read_rand((uint8_t*)&temp, 32);
+            if (sgx_read_rand((uint8_t*)&temp, sizeof(temp)) != SGX_SUCCESS)
+                break;
             temp = temp % total_rounds;
         }
         proof.push_back((int)temp);
@@ -129,7 +133,10 @@ void ecall_ml_vgg16() {
 
         //loading data
         float *p_conv1, *p_conv2, *p_fc1, *p_fc2, *p_fc3;
-        sgx_get_parameters(ith_batch, &p_conv1, &p_conv2, &p_fc1, &p_fc2, &p_fc3);
+        if (sgx_get_parameters(ith_batch, &p_conv1, &p_conv2, &p_fc1, &p_fc2, &p_fc3) != 0){
+            printf("[Enclave]: Round %d failed to load parameters!\n", ith_batch);
+            return;
+        }
         std::vector<float> v1,v2,v3,v4,v5;
         for(int i = 0; i < CONV1_SIZE; i++) v1.push_back(p_conv1[i]);
         for(int i = 0; i < CONV2_SIZE; i++) v2.push_back(p_conv2[i]);
